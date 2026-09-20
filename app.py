@@ -8,7 +8,7 @@ from datetime import datetime
 # ============================================================
 
 st.set_page_config(
-    page_title="SkillSwap",
+    page_title="SkillSync | SkillSwap",
     page_icon="🔄",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -117,6 +117,7 @@ def init_database():
 
 
 init_database()
+run_safe_migrations()
 
 
 # ============================================================
@@ -1151,6 +1152,42 @@ def get_statistics(user_id):
     )
 
 
+
+# ============================================================
+# SAFE DATABASE MIGRATIONS
+# ============================================================
+
+def ensure_column(table_name, column_name, column_definition):
+    """Add a missing column without deleting existing user data."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table_name})")
+    existing = {row[1] for row in cur.fetchall()}
+    if column_name not in existing:
+        cur.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+        conn.commit()
+    conn.close()
+
+
+def run_safe_migrations():
+    """Keep older local databases compatible with newer app versions."""
+    migrations = [
+        ("users", "profile_complete", "INTEGER DEFAULT 0"),
+        ("users", "created_at", "TEXT DEFAULT ''"),
+        ("requests", "updated_at", "TEXT DEFAULT ''"),
+        ("exchanges", "completed_at", "TEXT DEFAULT ''"),
+    ]
+    for table, column, definition in migrations:
+        try:
+            ensure_column(table, column, definition)
+        except sqlite3.OperationalError:
+            # The base schema may differ between earlier prototype versions.
+            # The app continues using the original schema in that case.
+            pass
+
+
 # ============================================================
 # SESSION STATE
 # ============================================================
@@ -1170,59 +1207,130 @@ if "user_id" not in st.session_state:
 
 st.markdown("""
 <style>
+:root {
+    --ss-primary: #7c3aed;
+    --ss-secondary: #2563eb;
+    --ss-bg: #0b1120;
+    --ss-card: rgba(30, 41, 59, 0.78);
+    --ss-border: rgba(148, 163, 184, 0.24);
+}
 
 .block-container {
-    padding-top: 2rem;
-    padding-bottom: 3rem;
+    max-width: 1450px;
+    padding-top: 1.4rem;
+    padding-bottom: 4rem;
+}
+
+[data-testid="stSidebar"] {
+    border-right: 1px solid rgba(148, 163, 184, 0.18);
 }
 
 .hero {
-    padding: 25px;
-    border-radius: 20px;
-    background: linear-gradient(
-        135deg,
-        #1e293b,
-        #0f172a
-    );
-    margin-bottom: 25px;
+    padding: 34px;
+    border-radius: 26px;
+    background:
+        radial-gradient(circle at top right, rgba(124,58,237,.35), transparent 38%),
+        linear-gradient(135deg, #111827 0%, #1e1b4b 50%, #0f172a 100%);
+    border: 1px solid rgba(167,139,250,.24);
+    margin-bottom: 24px;
+    box-shadow: 0 18px 60px rgba(2,6,23,.22);
 }
 
 .hero h1 {
-    font-size: 48px;
-    margin-bottom: 5px;
+    font-size: clamp(32px, 5vw, 58px);
+    line-height: 1.04;
+    letter-spacing: -1.8px;
+    margin-bottom: 10px;
 }
 
 .hero p {
-    font-size: 20px;
+    font-size: 18px;
     color: #cbd5e1;
+    max-width: 780px;
+}
+
+.section-title {
+    font-size: 1.65rem;
+    font-weight: 800;
+    letter-spacing: -.5px;
 }
 
 .match-card {
     padding: 22px;
-    border-radius: 18px;
-    border: 1px solid #334155;
+    border-radius: 20px;
+    border: 1px solid var(--ss-border);
+    background: linear-gradient(145deg, rgba(30,41,59,.72), rgba(15,23,42,.72));
     margin-bottom: 18px;
+    box-shadow: 0 8px 26px rgba(2,6,23,.12);
 }
 
 .reciprocal {
-    padding: 12px;
-    border-radius: 10px;
-    background: #064e3b;
+    padding: 12px 15px;
+    border-radius: 12px;
+    background: linear-gradient(90deg, rgba(6,78,59,.9), rgba(5,150,105,.18));
+    border: 1px solid rgba(110,231,183,.25);
     color: #6ee7b7;
-    font-weight: 700;
+    font-weight: 800;
     margin-top: 12px;
 }
 
 .badge {
+    display: inline-block;
     padding: 5px 10px;
-    border-radius: 20px;
-    font-size: 13px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
 }
 
 .small-text {
     color: #94a3b8;
+    font-size: 13px;
 }
 
+.metric-card {
+    border: 1px solid var(--ss-border);
+    border-radius: 18px;
+    padding: 18px;
+    background: rgba(15,23,42,.42);
+}
+
+.progress-track {
+    height: 9px;
+    border-radius: 99px;
+    background: rgba(148,163,184,.18);
+    overflow: hidden;
+    margin: 8px 0 12px;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, #2563eb, #8b5cf6);
+}
+
+.demo-banner {
+    padding: 12px 16px;
+    border-radius: 14px;
+    background: linear-gradient(90deg, rgba(37,99,235,.14), rgba(124,58,237,.16));
+    border: 1px solid rgba(129,140,248,.24);
+    margin-bottom: 18px;
+}
+
+footer { visibility: hidden; }
+
+@media (max-width: 700px) {
+    .block-container {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    .hero {
+        padding: 24px;
+        border-radius: 20px;
+    }
+    .match-card {
+        padding: 16px;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1232,11 +1340,16 @@ st.markdown("""
 # ============================================================
 
 st.sidebar.markdown(
-    "# 🔄 SkillSwap"
+    "# 🔄 SkillSync"
 )
 
-st.sidebar.caption(
-    "Exchange Skills. Grow Together."
+st.sidebar.caption("SkillSwap • Peer-to-peer learning network")
+
+st.sidebar.caption("Exchange skills. Build opportunities. Grow together.")
+
+st.sidebar.markdown(
+    '<div class="demo-banner"><b>🚀 Hackathon Prototype</b><br><span class="small-text">SDG 8 • Decent Work & Economic Growth</span></div>',
+    unsafe_allow_html=True
 )
 
 if not st.session_state.logged_in:
@@ -1322,7 +1435,7 @@ if page == "🏠 Home":
 
         st.metric(
             "🤖 Matching",
-            "Smart AI-style"
+            "Smart Rule-based"
         )
 
     with c3:
@@ -2086,6 +2199,15 @@ elif page == "🔎 Find Matches":
                 "Match",
                 f"{score}%"
             )
+            st.markdown(
+                f"""
+                <div class="progress-track">
+                    <div class="progress-fill" style="width:{max(0, min(100, score))}%"></div>
+                </div>
+                <div class="small-text">Compatibility score • rule-based engine</div>
+                """,
+                unsafe_allow_html=True
+            )
 
         if result["reciprocal"]:
 
@@ -2670,3 +2792,13 @@ elif page == "🔔 Notifications":
             )
 
             st.rerun()
+
+# ============================================================
+# APP FOOTER
+# ============================================================
+
+st.markdown("---")
+st.caption(
+    "🔄 SkillSync • Skill-for-skill learning • Built with Python, Streamlit and SQLite "
+    "• Prototype for MAITRON 2026"
+)
