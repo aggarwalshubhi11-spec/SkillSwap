@@ -116,6 +116,42 @@ def init_database():
     conn.close()
 
 
+# ============================================================
+# SAFE DATABASE MIGRATIONS
+# ============================================================
+
+def ensure_column(table_name, column_name, column_definition):
+    """Add a missing column without deleting existing user data."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table_name})")
+    existing = {row[1] for row in cur.fetchall()}
+    if column_name not in existing:
+        cur.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+        conn.commit()
+    conn.close()
+
+
+def run_safe_migrations():
+    """Keep older local databases compatible with newer app versions."""
+    migrations = [
+        ("users", "profile_complete", "INTEGER DEFAULT 0"),
+        ("users", "created_at", "TEXT DEFAULT ''"),
+        ("requests", "updated_at", "TEXT DEFAULT ''"),
+        ("exchanges", "completed_at", "TEXT DEFAULT ''"),
+    ]
+    for table, column, definition in migrations:
+        try:
+            ensure_column(table, column, definition)
+        except sqlite3.OperationalError:
+            # The base schema may differ between earlier prototype versions.
+            # The app continues using the original schema in that case.
+            pass
+
+
+
 init_database()
 run_safe_migrations()
 
@@ -1151,41 +1187,6 @@ def get_statistics(user_id):
         rating
     )
 
-
-
-# ============================================================
-# SAFE DATABASE MIGRATIONS
-# ============================================================
-
-def ensure_column(table_name, column_name, column_definition):
-    """Add a missing column without deleting existing user data."""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table_name})")
-    existing = {row[1] for row in cur.fetchall()}
-    if column_name not in existing:
-        cur.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-        )
-        conn.commit()
-    conn.close()
-
-
-def run_safe_migrations():
-    """Keep older local databases compatible with newer app versions."""
-    migrations = [
-        ("users", "profile_complete", "INTEGER DEFAULT 0"),
-        ("users", "created_at", "TEXT DEFAULT ''"),
-        ("requests", "updated_at", "TEXT DEFAULT ''"),
-        ("exchanges", "completed_at", "TEXT DEFAULT ''"),
-    ]
-    for table, column, definition in migrations:
-        try:
-            ensure_column(table, column, definition)
-        except sqlite3.OperationalError:
-            # The base schema may differ between earlier prototype versions.
-            # The app continues using the original schema in that case.
-            pass
 
 
 # ============================================================
