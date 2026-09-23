@@ -2,2804 +2,475 @@ import streamlit as st
 import sqlite3
 import hashlib
 from datetime import datetime
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-st.set_page_config(
-    page_title="SkillSync | SkillSwap",
-    page_icon="🔄",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-DB = "skillswap.db"
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-def get_db():
-    return sqlite3.connect(DB, check_same_thread=False)
-
-
-def init_database():
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            bio TEXT DEFAULT '',
-            availability TEXT DEFAULT 'Flexible',
-            mode TEXT DEFAULT 'Online',
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS skills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_skills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            skill_id INTEGER NOT NULL,
-            skill_type TEXT NOT NULL,
-            level TEXT NOT NULL,
-
-            FOREIGN KEY(user_id) REFERENCES users(id),
-            FOREIGN KEY(skill_id) REFERENCES skills(id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER NOT NULL,
-            receiver_id INTEGER NOT NULL,
-            message TEXT,
-            status TEXT DEFAULT 'Pending',
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS exchanges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id INTEGER NOT NULL,
-            user1 INTEGER NOT NULL,
-            user2 INTEGER NOT NULL,
-            skill_from_user1 TEXT DEFAULT '',
-            skill_from_user2 TEXT DEFAULT '',
-            scheduled_date TEXT DEFAULT '',
-            scheduled_time TEXT DEFAULT '',
-            status TEXT DEFAULT 'Active',
-            completed_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ratings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            exchange_id INTEGER NOT NULL,
-            rater_id INTEGER NOT NULL,
-            rated_id INTEGER NOT NULL,
-            rating INTEGER NOT NULL,
-            comment TEXT DEFAULT '',
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            message TEXT NOT NULL,
-            is_read INTEGER DEFAULT 0,
-            created_at TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# SAFE DATABASE MIGRATIONS
-# ============================================================
-
-def ensure_column(table_name, column_name, column_definition):
-    """Add a missing column without deleting existing user data."""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table_name})")
-    existing = {row[1] for row in cur.fetchall()}
-    if column_name not in existing:
-        cur.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-        )
-        conn.commit()
-    conn.close()
-
-
-def run_safe_migrations():
-    """Keep older local databases compatible with newer app versions."""
-    migrations = [
-        ("users", "profile_complete", "INTEGER DEFAULT 0"),
-        ("users", "created_at", "TEXT DEFAULT ''"),
-        ("requests", "updated_at", "TEXT DEFAULT ''"),
-        ("exchanges", "completed_at", "TEXT DEFAULT ''"),
-    ]
-    for table, column, definition in migrations:
-        try:
-            ensure_column(table, column, definition)
-        except sqlite3.OperationalError:
-            # The base schema may differ between earlier prototype versions.
-            # The app continues using the original schema in that case.
-            pass
-
-
-
-init_database()
-run_safe_migrations()
-
-
-# ============================================================
-# SECURITY
-# ============================================================
-
-def hash_password(password):
-    return hashlib.sha256(
-        password.encode("utf-8")
-    ).hexdigest()
-
-
-# ============================================================
-# USER FUNCTIONS
-# ============================================================
-
-def create_user(name, email, password):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    try:
-
-        cur.execute("""
-            INSERT INTO users
-            (name, email, password, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (
-            name.strip(),
-            email.strip().lower(),
-            hash_password(password),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-
-        conn.commit()
-        return True
-
-    except sqlite3.IntegrityError:
-
-        return False
-
-    finally:
-
-        conn.close()
-
-
-def login_user(email, password):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, name, email
-        FROM users
-        WHERE email = ?
-        AND password = ?
-    """, (
-        email.strip().lower(),
-        hash_password(password)
-    ))
-
-    result = cur.fetchone()
-
-    conn.close()
-
-    return result
-
-
-def get_user(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT *
-        FROM users
-        WHERE id = ?
-    """, (user_id,))
-
-    result = cur.fetchone()
-
-    conn.close()
-
-    return result
-
-
-def update_profile(
-    user_id,
-    bio,
-    availability,
-    mode
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE users
-
-        SET bio = ?,
-            availability = ?,
-            mode = ?
-
-        WHERE id = ?
-    """, (
-        bio,
-        availability,
-        mode,
-        user_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# SKILL FUNCTIONS
-# ============================================================
-
-def get_or_create_skill(skill_name):
-
-    skill_name = skill_name.strip().title()
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT OR IGNORE INTO skills(name)
-        VALUES (?)
-    """, (skill_name,))
-
-    conn.commit()
-
-    cur.execute("""
-        SELECT id
-        FROM skills
-        WHERE name = ?
-    """, (skill_name,))
-
-    skill_id = cur.fetchone()[0]
-
-    conn.close()
-
-    return skill_id
-
-
-def add_skill(
-    user_id,
-    skill_name,
-    skill_type,
-    level
-):
-
-    if not skill_name.strip():
-        return False
-
-    skill_id = get_or_create_skill(
-        skill_name
-    )
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id
-        FROM user_skills
-
-        WHERE user_id = ?
-        AND skill_id = ?
-        AND skill_type = ?
-    """, (
-        user_id,
-        skill_id,
-        skill_type
-    ))
-
-    if cur.fetchone():
-
-        conn.close()
-        return False
-
-    cur.execute("""
-        INSERT INTO user_skills
-        (user_id, skill_id, skill_type, level)
-
-        VALUES (?, ?, ?, ?)
-    """, (
-        user_id,
-        skill_id,
-        skill_type,
-        level
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return True
-
-
-def get_skills(user_id, skill_type):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            skills.name,
-            user_skills.level
-
-        FROM user_skills
-
-        JOIN skills
-        ON skills.id = user_skills.skill_id
-
-        WHERE user_skills.user_id = ?
-        AND user_skills.skill_type = ?
-
-        ORDER BY skills.name
-    """, (
-        user_id,
-        skill_type
-    ))
-
-    result = cur.fetchall()
-
-    conn.close()
-
-    return result
-
-
-def delete_skill(
-    user_id,
-    skill_name,
-    skill_type
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        DELETE FROM user_skills
-
-        WHERE user_id = ?
-        AND skill_type = ?
-
-        AND skill_id = (
-            SELECT id
-            FROM skills
-            WHERE name = ?
-        )
-    """, (
-        user_id,
-        skill_type,
-        skill_name
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# NOTIFICATIONS
-# ============================================================
-
-def add_notification(
-    user_id,
-    title,
-    message
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO notifications
-        (user_id, title, message, created_at)
-
-        VALUES (?, ?, ?, ?)
-    """, (
-        user_id,
-        title,
-        message,
-        datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_notifications(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, title, message, is_read, created_at
-
-        FROM notifications
-
-        WHERE user_id = ?
-
-        ORDER BY id DESC
-    """, (user_id,))
-
-    result = cur.fetchall()
-
-    conn.close()
-
-    return result
-
-
-def unread_count(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT COUNT(*)
-
-        FROM notifications
-
-        WHERE user_id = ?
-        AND is_read = 0
-    """, (user_id,))
-
-    result = cur.fetchone()[0]
-
-    conn.close()
-
-    return result
-
-
-def mark_notifications_read(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE notifications
-        SET is_read = 1
-
-        WHERE user_id = ?
-    """, (user_id,))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# SMART MATCHING ENGINE
-# ============================================================
-
-LEVEL_SCORE = {
-    "Beginner": 1,
-    "Intermediate": 2,
-    "Advanced": 3
-}
-
-
-def calculate_match(my_id, other_id):
-
-    my_teach = {
-        skill[0].lower(): skill[1]
-        for skill in get_skills(
-            my_id,
-            "teach"
-        )
-    }
-
-    my_learn = {
-        skill[0].lower(): skill[1]
-        for skill in get_skills(
-            my_id,
-            "learn"
-        )
-    }
-
-    other_teach = {
-        skill[0].lower(): skill[1]
-        for skill in get_skills(
-            other_id,
-            "teach"
-        )
-    }
-
-    other_learn = {
-        skill[0].lower(): skill[1]
-        for skill in get_skills(
-            other_id,
-            "learn"
-        )
-    }
-
-    # What they can teach me
-    can_learn = set(my_learn) & set(other_teach)
-
-    # What I can teach them
-    can_teach = set(my_teach) & set(other_learn)
-
-    score = 0
-    reasons = []
-
-    # --------------------------------------------------------
-    # LEARNING COMPATIBILITY
-    # --------------------------------------------------------
-
-    if can_learn:
-
-        score += 40
-
-        reasons.append(
-            "They teach a skill you want to learn."
-        )
-
-    # --------------------------------------------------------
-    # RECIPROCAL COMPATIBILITY
-    # --------------------------------------------------------
-
-    if can_teach:
-
-        score += 30
-
-        reasons.append(
-            "You teach a skill they want to learn."
-        )
-
-    # --------------------------------------------------------
-    # USER DATA
-    # --------------------------------------------------------
-
-    me = get_user(my_id)
-    other = get_user(other_id)
-
-    if me and other:
-
-        # Availability
-        if (
-            me[5] == other[5]
-            or me[5] == "Flexible"
-            or other[5] == "Flexible"
-        ):
-
-            score += 15
-
-            reasons.append(
-                "Availability is compatible."
-            )
-
-        # Learning mode
-        if (
-            me[6] == other[6]
-            or me[6] == "Both"
-            or other[6] == "Both"
-        ):
-
-            score += 10
-
-            reasons.append(
-                "Preferred learning mode is compatible."
-            )
-
-    # --------------------------------------------------------
-    # LEVEL COMPATIBILITY
-    # --------------------------------------------------------
-
-    level_match = False
-
-    for skill in can_learn:
-
-        learner_level = LEVEL_SCORE.get(
-            my_learn[skill],
-            1
-        )
-
-        teacher_level = LEVEL_SCORE.get(
-            other_teach[skill],
-            1
-        )
-
-        if teacher_level >= learner_level:
-
-            level_match = True
-            break
-
-    if level_match:
-
-        score += 5
-
-        reasons.append(
-            "Skill levels are compatible."
-        )
-
-    score = min(score, 100)
-
-    reciprocal = bool(
-        can_learn and can_teach
-    )
-
-    return {
-        "score": score,
-        "can_learn": can_learn,
-        "can_teach": can_teach,
-        "reciprocal": reciprocal,
-        "reasons": reasons
-    }
-
-
-# ============================================================
-# REQUESTS
-# ============================================================
-
-def request_exists(
-    sender_id,
-    receiver_id
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id
-
-        FROM requests
-
-        WHERE sender_id = ?
-        AND receiver_id = ?
-        AND status = 'Pending'
-    """, (
-        sender_id,
-        receiver_id
-    ))
-
-    result = cur.fetchone()
-
-    conn.close()
-
-    return result is not None
-
-
-def send_request(
-    sender_id,
-    receiver_id,
-    message
-):
-
-    if request_exists(
-        sender_id,
-        receiver_id
-    ):
-
-        return False
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO requests
-        (
-            sender_id,
-            receiver_id,
-            message,
-            status,
-            created_at
-        )
-
-        VALUES (?, ?, ?, 'Pending', ?)
-    """, (
-        sender_id,
-        receiver_id,
-        message,
-        datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    ))
-
-    conn.commit()
-    conn.close()
-
-    sender = get_user(sender_id)
-
-    add_notification(
-        receiver_id,
-        "📩 New Skill Exchange Request",
-        f"{sender[1]} wants to exchange skills with you."
-    )
-
-    return True
-
-
-def incoming_requests(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            requests.id,
-            users.id,
-            users.name,
-            users.email,
-            requests.message,
-            requests.status,
-            requests.created_at
-
-        FROM requests
-
-        JOIN users
-        ON users.id = requests.sender_id
-
-        WHERE requests.receiver_id = ?
-
-        ORDER BY requests.id DESC
-    """, (user_id,))
-
-    result = cur.fetchall()
-
-    conn.close()
-
-    return result
-
-
-def sent_requests(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            requests.id,
-            users.name,
-            requests.status,
-            requests.created_at
-
-        FROM requests
-
-        JOIN users
-        ON users.id = requests.receiver_id
-
-        WHERE requests.sender_id = ?
-
-        ORDER BY requests.id DESC
-    """, (user_id,))
-
-    result = cur.fetchall()
-
-    conn.close()
-
-    return result
-
-
-# ============================================================
-# EXCHANGE FUNCTIONS
-# ============================================================
-
-def accept_request(request_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            sender_id,
-            receiver_id
-        FROM requests
-        WHERE id = ?
-    """, (request_id,))
-
-    request = cur.fetchone()
-
-    if not request:
-
-        conn.close()
-        return
-
-    sender_id, receiver_id = request
-
-    cur.execute("""
-        UPDATE requests
-
-        SET status = 'Accepted'
-
-        WHERE id = ?
-    """, (request_id,))
-
-    cur.execute("""
-        SELECT id
-        FROM exchanges
-        WHERE request_id = ?
-    """, (request_id,))
-
-    existing = cur.fetchone()
-
-    if not existing:
-
-        cur.execute("""
-            INSERT INTO exchanges
-            (
-                request_id,
-                user1,
-                user2,
-                status
-            )
-
-            VALUES (?, ?, ?, 'Active')
-        """, (
-            request_id,
-            sender_id,
-            receiver_id
-        ))
-
-    conn.commit()
-    conn.close()
-
-    receiver = get_user(receiver_id)
-
-    add_notification(
-        sender_id,
-        "🤝 Request Accepted",
-        f"{receiver[1]} accepted your skill exchange request."
-    )
-
-
-def reject_request(request_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE requests
-
-        SET status = 'Rejected'
-
-        WHERE id = ?
-    """, (request_id,))
-
-    cur.execute("""
-        SELECT sender_id
-        FROM requests
-        WHERE id = ?
-    """, (request_id,))
-
-    sender = cur.fetchone()
-
-    conn.commit()
-    conn.close()
-
-    if sender:
-
-        add_notification(
-            sender[0],
-            "Request Update",
-            "Your skill exchange request was declined."
-        )
-
-
-def get_exchanges(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            exchanges.id,
-            exchanges.user1,
-            exchanges.user2,
-            exchanges.skill_from_user1,
-            exchanges.skill_from_user2,
-            exchanges.scheduled_date,
-            exchanges.scheduled_time,
-            exchanges.status,
-            users.name
-
-        FROM exchanges
-
-        JOIN users
-        ON users.id =
-            CASE
-                WHEN exchanges.user1 = ?
-                THEN exchanges.user2
-                ELSE exchanges.user1
-            END
-
-        WHERE exchanges.user1 = ?
-        OR exchanges.user2 = ?
-
-        ORDER BY exchanges.id DESC
-    """, (
-        user_id,
-        user_id,
-        user_id
-    ))
-
-    result = cur.fetchall()
-
-    conn.close()
-
-    return result
-
-
-def schedule_exchange(
-    exchange_id,
-    date,
-    time
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE exchanges
-
-        SET scheduled_date = ?,
-            scheduled_time = ?
-
-        WHERE id = ?
-    """, (
-        date,
-        time,
-        exchange_id
-    ))
-
-    conn.commit()
-
-    cur.execute("""
-        SELECT user1, user2
-        FROM exchanges
-        WHERE id = ?
-    """, (exchange_id,))
-
-    users = cur.fetchone()
-
-    conn.close()
-
-    if users:
-
-        add_notification(
-            users[0],
-            "📅 Exchange Scheduled",
-            f"Your skill exchange is scheduled for {date} at {time}."
-        )
-
-        add_notification(
-            users[1],
-            "📅 Exchange Scheduled",
-            f"Your skill exchange is scheduled for {date} at {time}."
-        )
-
-
-def complete_exchange(exchange_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE exchanges
-
-        SET status = 'Completed',
-            completed_at = ?
-
-        WHERE id = ?
-    """, (
-        datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        exchange_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# RATINGS
-# ============================================================
-
-def has_rated(
-    exchange_id,
-    rater_id
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id
-
-        FROM ratings
-
-        WHERE exchange_id = ?
-        AND rater_id = ?
-    """, (
-        exchange_id,
-        rater_id
-    ))
-
-    result = cur.fetchone()
-
-    conn.close()
-
-    return result is not None
-
-
-def submit_rating(
-    exchange_id,
-    rater_id,
-    rated_id,
-    rating,
-    comment
-):
-
-    if has_rated(
-        exchange_id,
-        rater_id
-    ):
-
-        return False
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO ratings
-        (
-            exchange_id,
-            rater_id,
-            rated_id,
-            rating,
-            comment,
-            created_at
-        )
-
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        exchange_id,
-        rater_id,
-        rated_id,
-        rating,
-        comment,
-        datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    ))
-
-    conn.commit()
-    conn.close()
-
-    add_notification(
-        rated_id,
-        "⭐ New Rating",
-        f"You received a {rating}/5 rating."
-    )
-
-    return True
-
-
-def get_average_rating(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT AVG(rating)
-
-        FROM ratings
-
-        WHERE rated_id = ?
-    """, (user_id,))
-
-    result = cur.fetchone()[0]
-
-    conn.close()
-
-    return round(result, 1) if result else 0
-
-
-# ============================================================
-# STATISTICS
-# ============================================================
-
-def get_statistics(user_id):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM user_skills
-        WHERE user_id = ?
-    """, (user_id,))
-
-    total_skills = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM exchanges
-        WHERE
-            (user1 = ? OR user2 = ?)
-            AND status = 'Completed'
-    """, (
-        user_id,
-        user_id
-    ))
-
-    completed = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM exchanges
-        WHERE
-            (user1 = ? OR user2 = ?)
-            AND status = 'Active'
-    """, (
-        user_id,
-        user_id
-    ))
-
-    active = cur.fetchone()[0]
-
-    conn.close()
-
-    rating = get_average_rating(
-        user_id
-    )
-
-    return (
-        total_skills,
-        active,
-        completed,
-        rating
-    )
-
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "logged_in" not in st.session_state:
-
-    st.session_state.logged_in = False
-
-if "user_id" not in st.session_state:
-
-    st.session_state.user_id = None
-
-
-# ============================================================
-# CUSTOM DESIGN
-# ============================================================
+from pathlib import Path
+
+st.set_page_config(page_title="SkillSwap 2.0", page_icon="🔄", layout="wide", initial_sidebar_state="expanded")
+DB = Path("skillswap.db")
+NOW = lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 st.markdown("""
 <style>
-:root {
-    --ss-primary: #7c3aed;
-    --ss-secondary: #2563eb;
-    --ss-bg: #0b1120;
-    --ss-card: rgba(30, 41, 59, 0.78);
-    --ss-border: rgba(148, 163, 184, 0.24);
-}
-
-.block-container {
-    max-width: 1450px;
-    padding-top: 1.4rem;
-    padding-bottom: 4rem;
-}
-
-[data-testid="stSidebar"] {
-    border-right: 1px solid rgba(148, 163, 184, 0.18);
-}
-
-.hero {
-    padding: 34px;
-    border-radius: 26px;
-    background:
-        radial-gradient(circle at top right, rgba(124,58,237,.35), transparent 38%),
-        linear-gradient(135deg, #111827 0%, #1e1b4b 50%, #0f172a 100%);
-    border: 1px solid rgba(167,139,250,.24);
-    margin-bottom: 24px;
-    box-shadow: 0 18px 60px rgba(2,6,23,.22);
-}
-
-.hero h1 {
-    font-size: clamp(32px, 5vw, 58px);
-    line-height: 1.04;
-    letter-spacing: -1.8px;
-    margin-bottom: 10px;
-}
-
-.hero p {
-    font-size: 18px;
-    color: #cbd5e1;
-    max-width: 780px;
-}
-
-.section-title {
-    font-size: 1.65rem;
-    font-weight: 800;
-    letter-spacing: -.5px;
-}
-
-.match-card {
-    padding: 22px;
-    border-radius: 20px;
-    border: 1px solid var(--ss-border);
-    background: linear-gradient(145deg, rgba(30,41,59,.72), rgba(15,23,42,.72));
-    margin-bottom: 18px;
-    box-shadow: 0 8px 26px rgba(2,6,23,.12);
-}
-
-.reciprocal {
-    padding: 12px 15px;
-    border-radius: 12px;
-    background: linear-gradient(90deg, rgba(6,78,59,.9), rgba(5,150,105,.18));
-    border: 1px solid rgba(110,231,183,.25);
-    color: #6ee7b7;
-    font-weight: 800;
-    margin-top: 12px;
-}
-
-.badge {
-    display: inline-block;
-    padding: 5px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 700;
-}
-
-.small-text {
-    color: #94a3b8;
-    font-size: 13px;
-}
-
-.metric-card {
-    border: 1px solid var(--ss-border);
-    border-radius: 18px;
-    padding: 18px;
-    background: rgba(15,23,42,.42);
-}
-
-.progress-track {
-    height: 9px;
-    border-radius: 99px;
-    background: rgba(148,163,184,.18);
-    overflow: hidden;
-    margin: 8px 0 12px;
-}
-
-.progress-fill {
-    height: 100%;
-    border-radius: 99px;
-    background: linear-gradient(90deg, #2563eb, #8b5cf6);
-}
-
-.demo-banner {
-    padding: 12px 16px;
-    border-radius: 14px;
-    background: linear-gradient(90deg, rgba(37,99,235,.14), rgba(124,58,237,.16));
-    border: 1px solid rgba(129,140,248,.24);
-    margin-bottom: 18px;
-}
-
-footer { visibility: hidden; }
-
-@media (max-width: 700px) {
-    .block-container {
-        padding-left: 1rem;
-        padding-right: 1rem;
-    }
-    .hero {
-        padding: 24px;
-        border-radius: 20px;
-    }
-    .match-card {
-        padding: 16px;
-    }
-}
+:root { --accent:#7c3aed; --mint:#34d399; }
+.block-container {padding-top: 2rem; padding-bottom: 3rem;}
+.hero {padding:2rem; border-radius:24px; background:linear-gradient(135deg,#21113f,#102a43); border:1px solid #49346b; margin-bottom:1.2rem;}
+.hero h1 {font-size:2.7rem; margin-bottom:.3rem;}
+.hero p {color:#cbd5e1; font-size:1.05rem;}
+.card {padding:1rem 1.2rem; border:1px solid rgba(148,163,184,.25); border-radius:18px; background:rgba(15,23,42,.35); margin-bottom:.8rem;}
+.badge {display:inline-block; padding:.2rem .55rem; border-radius:999px; font-size:.78rem; font-weight:700; background:#1e293b; color:#cbd5e1;}
+.good {background:#064e3b; color:#6ee7b7;}
+.warn {background:#713f12; color:#fde68a;}
+.muted {color:#94a3b8; font-size:.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+def db():
+    return sqlite3.connect(DB, check_same_thread=False)
 
-st.sidebar.markdown(
-    "# 🔄 SkillSync"
-)
 
-st.sidebar.caption("SkillSwap • Peer-to-peer learning network")
+def column_exists(conn, table, column):
+    return column in [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
-st.sidebar.caption("Exchange skills. Build opportunities. Grow together.")
 
-st.sidebar.markdown(
-    '<div class="demo-banner"><b>🚀 Hackathon Prototype</b><br><span class="small-text">SDG 8 • Decent Work & Economic Growth</span></div>',
-    unsafe_allow_html=True
-)
+def ensure_column(conn, table, column, definition):
+    if not column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def init_db():
+    conn = db(); cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL, bio TEXT DEFAULT '', availability TEXT DEFAULT 'Flexible',
+        mode TEXT DEFAULT 'Online', created_at TEXT, verified INTEGER DEFAULT 0,
+        verification_status TEXT DEFAULT 'Unverified', credits INTEGER DEFAULT 20,
+        reputation REAL DEFAULT 0, completed_count INTEGER DEFAULT 0)""")
+    cur.execute("CREATE TABLE IF NOT EXISTS skills(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS user_skills(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, skill_id INTEGER,
+        skill_type TEXT, level TEXT, verification_status TEXT DEFAULT 'Self-declared')""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS evidence(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, skill_name TEXT,
+        evidence_type TEXT, evidence_url TEXT, description TEXT, status TEXT DEFAULT 'Submitted', auto_score INTEGER DEFAULT 0, auto_notes TEXT DEFAULT '', created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS requests(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, sender_id INTEGER, receiver_id INTEGER,
+        message TEXT, status TEXT DEFAULT 'Pending', created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS exchanges(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, user1 INTEGER, user2 INTEGER,
+        skill_from_user1 TEXT DEFAULT '', skill_from_user2 TEXT DEFAULT '', scheduled_date TEXT DEFAULT '',
+        scheduled_time TEXT DEFAULT '', status TEXT DEFAULT 'Active', completed_at TEXT,
+        commitment_status TEXT DEFAULT 'Pending', session_notes TEXT DEFAULT '')""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ratings(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, exchange_id INTEGER, rater_id INTEGER,
+        rated_id INTEGER, rating INTEGER, comment TEXT DEFAULT '', created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS notifications(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, title TEXT, message TEXT,
+        is_read INTEGER DEFAULT 0, created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS reports(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_id INTEGER, reported_id INTEGER,
+        reason TEXT, status TEXT DEFAULT 'Open', created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS credit_ledger(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER,
+        reason TEXT, exchange_id INTEGER, created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS blocks(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, blocker_id INTEGER, blocked_id INTEGER,
+        created_at TEXT, UNIQUE(blocker_id, blocked_id))""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ratings(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, exchange_id INTEGER, rater_id INTEGER,
+        rated_id INTEGER, rating INTEGER, comment TEXT DEFAULT '', created_at TEXT,
+        UNIQUE(exchange_id, rater_id))""")
+    # Safe migration for older versions
+    for table, col, definition in [
+        ('users','verified','INTEGER DEFAULT 0'), ('users','verification_status',"TEXT DEFAULT 'Unverified'"),
+        ('users','credits','INTEGER DEFAULT 20'), ('users','reputation','REAL DEFAULT 0'),
+        ('users','completed_count','INTEGER DEFAULT 0'), ('user_skills','verification_status',"TEXT DEFAULT 'Self-declared'"),
+        ('exchanges','commitment_status',"TEXT DEFAULT 'Pending'"), ('exchanges','session_notes',"TEXT DEFAULT ''"), ('evidence','auto_score','INTEGER DEFAULT 0'), ('evidence','auto_notes',"TEXT DEFAULT ''")]:
+        ensure_column(conn, table, col, definition)
+    conn.commit(); conn.close()
+
+
+def hash_pw(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def create_user(name, email, password):
+    conn = db()
+    try:
+        conn.execute("INSERT INTO users(name,email,password,created_at) VALUES(?,?,?,?)", (name.strip(), email.strip().lower(), hash_pw(password), NOW()))
+        conn.commit(); return True
+    except sqlite3.IntegrityError:
+        return False
+    finally: conn.close()
+
+
+def login(email, password):
+    conn = db(); row = conn.execute("SELECT id,name,email FROM users WHERE email=? AND password=?", (email.strip().lower(), hash_pw(password))).fetchone(); conn.close(); return row
+
+
+def user(uid):
+    conn = db(); row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone(); conn.close(); return row
+
+
+def add_note(uid, title, message):
+    conn = db(); conn.execute("INSERT INTO notifications(user_id,title,message,created_at) VALUES(?,?,?,?)", (uid,title,message,NOW())); conn.commit(); conn.close()
+
+
+def unread(uid):
+    conn = db(); n = conn.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0", (uid,)).fetchone()[0]; conn.close(); return n
+
+
+def skills(uid, kind=None):
+    conn = db(); q = """SELECT s.name, us.level, us.verification_status FROM user_skills us JOIN skills s ON s.id=us.skill_id WHERE us.user_id=?"""; args=[uid]
+    if kind: q += " AND us.skill_type=?"; args.append(kind)
+    rows = conn.execute(q + " ORDER BY s.name", args).fetchall(); conn.close(); return rows
+
+
+def add_skill(uid, name, kind, level):
+    name = name.strip().title()
+    if not name: return False
+    conn = db(); conn.execute("INSERT OR IGNORE INTO skills(name) VALUES(?)", (name,)); sid = conn.execute("SELECT id FROM skills WHERE name=?", (name,)).fetchone()[0]
+    exists = conn.execute("SELECT id FROM user_skills WHERE user_id=? AND skill_id=? AND skill_type=?", (uid,sid,kind)).fetchone()
+    if exists: conn.close(); return False
+    conn.execute("INSERT INTO user_skills(user_id,skill_id,skill_type,level) VALUES(?,?,?,?)", (uid,sid,kind,level)); conn.commit(); conn.close(); return True
+
+
+def remove_skill(uid, name, kind):
+    conn = db(); conn.execute("DELETE FROM user_skills WHERE user_id=? AND skill_type=? AND skill_id=(SELECT id FROM skills WHERE name=?)", (uid,kind,name)); conn.commit(); conn.close()
+
+
+def screen_evidence(etype, url, desc):
+    """Rule-based pre-screening only; it never proves real expertise."""
+    score = 0; checks = []
+    clean_url = (url or '').strip().lower(); clean_desc = (desc or '').strip()
+    if len(clean_desc) >= 80:
+        score += 35; checks.append('Detailed explanation provided')
+    elif len(clean_desc) >= 30:
+        score += 20; checks.append('Basic explanation provided')
+    else: checks.append('Add a more detailed explanation')
+    if etype in ['GitHub project','Portfolio link','Certificate'] and clean_url.startswith(('http://','https://')):
+        score += 30; checks.append('Web link format detected')
+    elif etype in ['Sample work','Practical assessment']:
+        score += 20; checks.append('Reviewer or practical assessment required')
+    else: checks.append('Add a public evidence link where possible')
+    if any(token in clean_url for token in ['github.com','gitlab.com','behance.net','drive.google.com','docs.google.com']):
+        score += 25; checks.append('Recognized evidence-host domain detected')
+    else: checks.append('Domain not automatically recognized')
+    status = 'Auto-screened: Ready for review' if score >= 55 else 'Auto-screened: Needs more evidence'
+    return min(score,100), status, '; '.join(checks)
+
+
+def submit_evidence(uid, skill, etype, url, desc):
+    score, status, notes = screen_evidence(etype, url, desc)
+    conn = db(); conn.execute("INSERT INTO evidence(user_id,skill_name,evidence_type,evidence_url,description,status,auto_score,auto_notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (uid,skill,etype,url,desc,status,score,notes,NOW())); conn.commit(); conn.close()
+
+
+def evidence_for(uid):
+    conn=db(); rows=conn.execute("SELECT id,skill_name,evidence_type,evidence_url,description,status,auto_score,auto_notes,created_at FROM evidence WHERE user_id=? ORDER BY id DESC", (uid,)).fetchall(); conn.close(); return rows
+
+def match(my_id, other_id):
+    mine_teach = {x[0].lower():x[1] for x in skills(my_id,'teach')}; mine_learn = {x[0].lower():x[1] for x in skills(my_id,'learn')}
+    their_teach = {x[0].lower():x[1] for x in skills(other_id,'teach')}; their_learn = {x[0].lower():x[1] for x in skills(other_id,'learn')}
+    can_learn = set(mine_learn) & set(their_teach); can_teach = set(mine_teach) & set(their_learn)
+    score = (40 if can_learn else 0) + (30 if can_teach else 0); reasons=[]
+    if can_learn: reasons.append('They teach a skill you want to learn.')
+    if can_teach: reasons.append('You teach a skill they want to learn.')
+    a,b=user(my_id),user(other_id)
+    if a[5]==b[5] or a[5]=='Flexible' or b[5]=='Flexible': score+=15; reasons.append('Availability is compatible.')
+    if a[6]==b[6] or a[6]=='Both' or b[6]=='Both': score+=10; reasons.append('Learning mode is compatible.')
+    if can_learn: score+=5; reasons.append('There is at least one learning target.')
+    return {'score':min(score,100),'learn':can_learn,'teach':can_teach,'reciprocal':bool(can_learn and can_teach),'reasons':reasons}
+
+
+def send_request(sender, receiver, message):
+    conn=db(); exists=conn.execute("SELECT id FROM requests WHERE sender_id=? AND receiver_id=? AND status='Pending'",(sender,receiver)).fetchone()
+    if exists: conn.close(); return False
+    conn.execute("INSERT INTO requests(sender_id,receiver_id,message,created_at) VALUES(?,?,?,?)",(sender,receiver,message,NOW())); conn.commit(); conn.close(); add_note(receiver,'New exchange request','You received a new skill exchange request.'); return True
+
+
+def incoming(uid):
+    conn=db(); rows=conn.execute("SELECT r.id,u.id,u.name,u.email,r.message,r.status,r.created_at FROM requests r JOIN users u ON u.id=r.sender_id WHERE r.receiver_id=? ORDER BY r.id DESC",(uid,)).fetchall(); conn.close(); return rows
+
+
+def accept_request(rid):
+    conn=db(); r=conn.execute("SELECT sender_id,receiver_id FROM requests WHERE id=?",(rid,)).fetchone()
+    if not r: conn.close(); return
+    conn.execute("UPDATE requests SET status='Accepted' WHERE id=?",(rid,)); conn.execute("INSERT INTO exchanges(request_id,user1,user2) VALUES(?,?,?)",(rid,r[0],r[1])); conn.commit(); conn.close(); add_note(r[0],'Request accepted','Your skill exchange request was accepted.')
+
+
+def reject_request(rid):
+    conn=db(); r=conn.execute("SELECT sender_id FROM requests WHERE id=?",(rid,)).fetchone(); conn.execute("UPDATE requests SET status='Rejected' WHERE id=?",(rid,)); conn.commit(); conn.close();
+    if r: add_note(r[0],'Request declined','Your skill exchange request was declined.')
+
+
+def exchanges(uid):
+    conn=db(); rows=conn.execute("""SELECT e.id,e.user1,e.user2,e.skill_from_user1,e.skill_from_user2,e.scheduled_date,e.scheduled_time,e.status,e.commitment_status,u.name
+    FROM exchanges e JOIN users u ON u.id=CASE WHEN e.user1=? THEN e.user2 ELSE e.user1 END WHERE e.user1=? OR e.user2=? ORDER BY e.id DESC""",(uid,uid,uid)).fetchall(); conn.close(); return rows
+
+
+def update_exchange(eid, date, time, commitment, notes, status=None):
+    conn=db(); q="UPDATE exchanges SET scheduled_date=?,scheduled_time=?,commitment_status=?,session_notes=?"; args=[date,time,commitment,notes]
+    if status: q += ",status=?"; args.append(status)
+    q += " WHERE id=?"; args.append(eid); conn.execute(q,args); conn.commit(); users=conn.execute("SELECT user1,user2 FROM exchanges WHERE id=?",(eid,)).fetchone(); conn.close()
+    if users:
+        for uid in users: add_note(uid,'Exchange updated',f'Exchange #{eid} has been updated.')
+
+
+def credit_change(uid, amount, reason="Adjustment", exchange_id=None):
+    conn=db()
+    conn.execute("UPDATE users SET credits=MAX(0,credits+?) WHERE id=?",(amount,uid))
+    conn.execute("INSERT INTO credit_ledger(user_id,amount,reason,exchange_id,created_at) VALUES(?,?,?,?,?)",(uid,amount,reason,exchange_id,NOW()))
+    conn.commit(); conn.close()
+
+
+def credit_history(uid):
+    conn=db(); rows=conn.execute("SELECT amount,reason,exchange_id,created_at FROM credit_ledger WHERE user_id=? ORDER BY id DESC",(uid,)).fetchall(); conn.close(); return rows
+
+
+def block_user(blocker, blocked):
+    conn=db(); conn.execute("INSERT OR IGNORE INTO blocks(blocker_id,blocked_id,created_at) VALUES(?,?,?)",(blocker,blocked,NOW())); conn.commit(); conn.close()
+
+
+def is_blocked(a,b):
+    conn=db(); row=conn.execute("SELECT id FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",(a,b,b,a)).fetchone(); conn.close(); return row is not None
+
+
+def save_rating(exchange_id, rater_id, rated_id, rating, comment):
+    conn=db(); conn.execute("INSERT OR REPLACE INTO ratings(exchange_id,rater_id,rated_id,rating,comment,created_at) VALUES(?,?,?,?,?,?)",(exchange_id,rater_id,rated_id,rating,comment,NOW()));
+    conn.execute("UPDATE users SET reputation=(SELECT COALESCE(AVG(rating),0) FROM ratings WHERE rated_id=?) WHERE id=?",(rated_id,rated_id)); conn.commit(); conn.close()
+
+
+def has_rating(exchange_id, rater_id):
+    conn=db(); row=conn.execute("SELECT id FROM ratings WHERE exchange_id=? AND rater_id=?",(exchange_id,rater_id)).fetchone(); conn.close(); return row is not None
+
+
+def complete_exchange(eid, uid):
+    conn=db(); row=conn.execute("SELECT user1,user2,status FROM exchanges WHERE id=?",(eid,)).fetchone()
+    if not row or uid not in row[:2]: conn.close(); return False
+    conn.execute("UPDATE exchanges SET status='Completed',completed_at=? WHERE id=?",(NOW(),eid)); conn.execute("UPDATE users SET completed_count=completed_count+1 WHERE id IN (?,?)",(row[0],row[1])); conn.commit(); conn.close()
+    for person in row[:2]:
+        credit_change(person,10,"Completed skill exchange",eid)
+        add_note(person,'Exchange completed',f'Exchange #{eid} was marked completed.')
+    return True
+
+
+def report_user(reporter, reported, reason):
+    conn=db(); conn.execute("INSERT INTO reports(reporter_id,reported_id,reason,created_at) VALUES(?,?,?,?)",(reporter,reported,reason,NOW())); conn.commit(); conn.close()
+
+
+def init_state():
+    st.session_state.setdefault('logged_in',False); st.session_state.setdefault('user_id',None)
+
+init_db(); init_state()
+
+st.sidebar.markdown('# 🔄 SkillSwap 2.0')
+st.sidebar.caption('Exchange skills. Build trust. Grow together.')
+st.sidebar.info('MAITRON prototype • SDG 8')
 
 if not st.session_state.logged_in:
-
-    page = st.sidebar.radio(
-        "Navigation",
-        [
-            "🏠 Home",
-            "🔐 Login",
-            "📝 Register"
-        ]
-    )
-
+    page=st.sidebar.radio('Navigation',['🏠 Home','🔐 Login','📝 Register'])
 else:
+    uid=st.session_state.user_id; me=user(uid)
+    nav=["🏠 Dashboard","👤 My Profile","🔎 Find Matches",f"📩 Requests ({unread(uid)})","🤝 My Exchanges","🛡️ Proof of Skill","🎓 Skill Passport","💳 Credit Wallet","🛡️ Safety Center","⭐ Ratings","🔔 Notifications"]
+    page=st.sidebar.radio('Navigation',nav)
+    st.sidebar.divider(); st.sidebar.write(f"👤 **{me[1]}**"); st.sidebar.metric('Skill Credits',me[10] if len(me)>10 else 20)
+    if st.sidebar.button('🚪 Logout',use_container_width=True): st.session_state.logged_in=False; st.session_state.user_id=None; st.rerun()
 
-    user = get_user(
-        st.session_state.user_id
-    )
+if page=='🏠 Home':
+    st.markdown('<div class="hero"><h1>🔄 SkillSwap 2.0</h1><p>Learn what you want by teaching what you know — with evidence screening, non-monetary learning points and accountability.</p></div>',unsafe_allow_html=True)
+    c1,c2,c3,c4=st.columns(4); c1.metric('Core model','Skill-for-skill'); c2.metric('Trust','Evidence + reports'); c3.metric('Exchange','Credit-based'); c4.metric('Theme','SDG 8')
+    st.subheader('How it works')
+    cols=st.columns(4)
+    for col,head,desc in zip(cols,['1. Build profile','2. Verify evidence','3. Exchange credits','4. Track progress'],['Add skills you teach and want to learn.','Submit project links or other evidence.','Request, commit, schedule and complete sessions.','Earn credits, ratings and Skill Passport progress.']):
+        with col: st.markdown(f'<div class="card"><h4>{head}</h4><p>{desc}</p></div>',unsafe_allow_html=True)
+    st.info('Example: You teach Python and want Canva. Another student teaches Canva and wants Python. SkillSwap identifies the reciprocal match.')
+    st.subheader('Trust principles')
+    st.write('Profiles distinguish self-declared skills from submitted evidence and verified skills. Users can report problems, track commitments and review completed exchanges.')
 
-    notifications = unread_count(
-        st.session_state.user_id
-    )
-
-    page = st.sidebar.radio(
-        "Navigation",
-        [
-            "🏠 Dashboard",
-            "👤 My Profile",
-            "🔎 Find Matches",
-            f"📩 Requests ({notifications})",
-            "🤝 My Exchanges",
-            "🎓 Skill Passport",
-            "🔔 Notifications"
-        ]
-    )
-
-    st.sidebar.divider()
-
-    st.sidebar.write(
-        f"👤 **{user[1]}**"
-    )
-
-    if st.sidebar.button(
-        "🚪 Logout",
-        use_container_width=True
-    ):
-
-        st.session_state.logged_in = False
-        st.session_state.user_id = None
-
-        st.rerun()
-
-
-# ============================================================
-# HOME
-# ============================================================
-
-if page == "🏠 Home":
-
-    st.markdown("""
-    <div class="hero">
-
-    <h1>🔄 SkillSwap</h1>
-
-    <p>
-    Exchange the skills you have.
-    Learn the skills you want.
-    </p>
-
-    </div>
-    """, unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-
-        st.metric(
-            "🤝 Model",
-            "Skill Exchange"
-        )
-
-    with c2:
-
-        st.metric(
-            "🤖 Matching",
-            "Smart Rule-based"
-        )
-
-    with c3:
-
-        st.metric(
-            "🌍 SDG",
-            "SDG 8"
-        )
-
-    st.divider()
-
-    st.header(
-        "How SkillSwap Works"
-    )
-
-    cols = st.columns(4)
-
-    process = [
-        (
-            "1️⃣",
-            "Build Profile",
-            "Add skills you can teach and skills you want to learn."
-        ),
-        (
-            "2️⃣",
-            "Get Matched",
-            "Our matching engine finds compatible learners."
-        ),
-        (
-            "3️⃣",
-            "Exchange",
-            "Connect, schedule and exchange skills."
-        ),
-        (
-            "4️⃣",
-            "Grow",
-            "Complete exchanges and build your Skill Passport."
-        )
-    ]
-
-    for col, item in zip(
-        cols,
-        process
-    ):
-
-        with col:
-
-            st.subheader(
-                f"{item[0]} {item[1]}"
-            )
-
-            st.write(
-                item[2]
-            )
-
-    st.divider()
-
-    st.info("""
-    💡 **Example**
-
-    You can teach **Python** but want to learn **Canva**.
-
-    Another student can teach **Canva** but wants to learn
-    **Python**.
-
-    SkillSwap detects this as a **reciprocal match**.
-    """)
-
-
-# ============================================================
-# REGISTER
-# ============================================================
-
-elif page == "📝 Register":
-
-    st.title(
-        "📝 Create Your SkillSwap Account"
-    )
-
-    st.caption(
-        "Start building your skill network."
-    )
-
-    with st.form(
-        "register_form"
-    ):
-
-        name = st.text_input(
-            "Full Name"
-        )
-
-        email = st.text_input(
-            "Email"
-        )
-
-        password = st.text_input(
-            "Password",
-            type="password"
-        )
-
-        confirm = st.text_input(
-            "Confirm Password",
-            type="password"
-        )
-
-        submit = st.form_submit_button(
-            "🚀 Create Account",
-            use_container_width=True
-        )
-
+elif page=='📝 Register':
+    st.title('📝 Create account')
+    with st.form('register'):
+        name=st.text_input('Full name'); email=st.text_input('Email'); password=st.text_input('Password',type='password'); confirm=st.text_input('Confirm password',type='password'); submit=st.form_submit_button('Create account',use_container_width=True)
     if submit:
-
-        if not name or not email or not password:
-
-            st.error(
-                "Please complete all fields."
-            )
-
-        elif password != confirm:
-
-            st.error(
-                "Passwords do not match."
-            )
-
-        elif len(password) < 6:
-
-            st.error(
-                "Password must contain at least 6 characters."
-            )
-
-        elif create_user(
-            name,
-            email,
-            password
-        ):
-
-            st.success(
-                "🎉 Account created successfully!"
-            )
-
-            st.info(
-                "Go to Login to continue."
-            )
-
-        else:
-
-            st.error(
-                "An account with this email already exists."
-            )
-
-
-# ============================================================
-# LOGIN
-# ============================================================
-
-elif page == "🔐 Login":
-
-    st.title(
-        "🔐 Welcome Back"
-    )
-
-    email = st.text_input(
-        "Email"
-    )
-
-    password = st.text_input(
-        "Password",
-        type="password"
-    )
-
-    if st.button(
-        "Login",
-        use_container_width=True
-    ):
-
-        user = login_user(
-            email,
-            password
-        )
-
-        if user:
-
-            st.session_state.logged_in = True
-            st.session_state.user_id = user[0]
-
-            st.success(
-                f"Welcome back, {user[1]}! 👋"
-            )
-
-            st.rerun()
-
-        else:
-
-            st.error(
-                "Invalid email or password."
-            )
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-elif page == "🏠 Dashboard":
-
-    user_id = st.session_state.user_id
-
-    user = get_user(user_id)
-
-    total_skills, active, completed, rating = (
-        get_statistics(user_id)
-    )
-
-    st.title(
-        f"Welcome back, {user[1]} 👋"
-    )
-
-    st.caption(
-        "Your SkillSwap activity at a glance."
-    )
-
-    st.divider()
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    with c1:
-
-        st.metric(
-            "🎯 Skills",
-            total_skills
-        )
-
-    with c2:
-
-        st.metric(
-            "🤝 Active",
-            active
-        )
-
-    with c3:
-
-        st.metric(
-            "✅ Completed",
-            completed
-        )
-
-    with c4:
-
-        st.metric(
-            "⭐ Rating",
-            rating if rating else "New"
-        )
-
-    st.divider()
-
-    teach = get_skills(
-        user_id,
-        "teach"
-    )
-
-    learn = get_skills(
-        user_id,
-        "learn"
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        st.subheader(
-            "🟢 Skills I Can Teach"
-        )
-
-        if teach:
-
-            for skill, level in teach:
-
-                st.write(
-                    f"**{skill}** · {level}"
-                )
-
-        else:
-
-            st.info(
-                "Add your teaching skills."
-            )
-
-    with c2:
-
-        st.subheader(
-            "🔵 Skills I Want To Learn"
-        )
-
-        if learn:
-
-            for skill, level in learn:
-
-                st.write(
-                    f"**{skill}** · {level}"
-                )
-
-        else:
-
-            st.info(
-                "Add your learning goals."
-            )
-
-    st.divider()
-
-    st.subheader(
-        "🚀 Your Next Step"
-    )
-
-    if not teach or not learn:
-
-        st.warning(
-            "Complete your profile to unlock smart matching."
-        )
-
-    else:
-
-        st.success(
-            "Your profile is ready! Go to **Find Matches** "
-            "to discover compatible learners."
-        )
-
-
-# ============================================================
-# PROFILE
-# ============================================================
-
-elif page == "👤 My Profile":
-
-    user_id = st.session_state.user_id
-
-    user = get_user(user_id)
-
-    st.title(
-        "👤 My Profile"
-    )
-
-    with st.form(
-        "profile_form"
-    ):
-
-        bio = st.text_area(
-            "About Me",
-            value=user[4],
-            placeholder="Tell others a little about yourself..."
-        )
-
-        availability_options = [
-            "Morning",
-            "Afternoon",
-            "Evening",
-            "Flexible"
-        ]
-
-        availability = st.selectbox(
-            "Availability",
-            availability_options,
-            index=availability_options.index(
-                user[5]
-            )
-            if user[5] in availability_options
-            else 3
-        )
-
-        mode_options = [
-            "Online",
-            "Offline",
-            "Both"
-        ]
-
-        mode = st.selectbox(
-            "Preferred Mode",
-            mode_options,
-            index=mode_options.index(
-                user[6]
-            )
-            if user[6] in mode_options
-            else 0
-        )
-
-        save = st.form_submit_button(
-            "💾 Save Profile"
-        )
-
+        if not name or not email or not password: st.error('Complete all fields.')
+        elif password!=confirm: st.error('Passwords do not match.')
+        elif len(password)<6: st.error('Password must contain at least 6 characters.')
+        elif create_user(name,email,password): st.success('Account created. Go to Login.')
+        else: st.error('An account with this email already exists.')
+
+elif page=='🔐 Login':
+    st.title('🔐 Welcome back')
+    with st.form('login'):
+        email=st.text_input('Email'); password=st.text_input('Password',type='password'); submit=st.form_submit_button('Login',use_container_width=True)
+    if submit:
+        row=login(email,password)
+        if row: st.session_state.logged_in=True; st.session_state.user_id=row[0]; st.rerun()
+        else: st.error('Invalid email or password.')
+
+elif page=='🏠 Dashboard':
+    me=user(uid); teach=skills(uid,'teach'); learn=skills(uid,'learn'); ex=exchanges(uid)
+    st.title(f'Welcome back, {me[1]} 👋')
+    c1,c2,c3,c4=st.columns(4); c1.metric('Teaching skills',len(teach)); c2.metric('Learning goals',len(learn)); c3.metric('Credits',me[10]); c4.metric('Completed',me[12])
+    st.subheader('Profile trust status')
+    st.markdown(f'<span class="badge {"good" if me[8]=="Verified" else "warn"}">{me[8]}</span>',unsafe_allow_html=True)
+    st.caption('Verification status is skill/profile specific and should not be treated as a universal identity guarantee.')
+    st.subheader('Your next steps')
+    st.write('1. Add teaching and learning skills. 2. Submit evidence. 3. Find a compatible partner. 4. Agree on a session and complete it.')
+
+elif page=='👤 My Profile':
+    st.title('👤 My Profile'); me=user(uid)
+    with st.form('profile'):
+        bio=st.text_area('About you',value=me[4] or ''); availability=st.selectbox('Availability',['Flexible','Weekdays','Weekends','Evenings'],index=['Flexible','Weekdays','Weekends','Evenings'].index(me[5]) if me[5] in ['Flexible','Weekdays','Weekends','Evenings'] else 0); mode=st.selectbox('Mode',['Online','Offline','Both'],index=['Online','Offline','Both'].index(me[6]) if me[6] in ['Online','Offline','Both'] else 0); save=st.form_submit_button('Save profile',use_container_width=True)
     if save:
-
-        update_profile(
-            user_id,
-            bio,
-            availability,
-            mode
-        )
-
-        st.success(
-            "Profile updated successfully! ✅"
-        )
-
-    st.divider()
-
-    # TEACHING
-    st.header(
-        "🟢 Skills I Can Teach"
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        teach_name = st.text_input(
-            "Skill name",
-            key="teach_skill"
-        )
-
-    with c2:
-
-        teach_level = st.selectbox(
-            "Skill level",
-            [
-                "Beginner",
-                "Intermediate",
-                "Advanced"
-            ],
-            key="teach_level"
-        )
-
-    if st.button(
-        "➕ Add Teaching Skill"
-    ):
-
-        if add_skill(
-            user_id,
-            teach_name,
-            "teach",
-            teach_level
-        ):
-
-            st.success(
-                "Teaching skill added!"
-            )
-
-            st.rerun()
-
-        else:
-
-            st.warning(
-                "Enter a new skill."
-            )
-
-    teaching = get_skills(
-        user_id,
-        "teach"
-    )
-
-    for skill, level in teaching:
-
-        c1, c2, c3 = st.columns(
-            [5, 2, 1]
-        )
-
-        with c1:
-
-            st.write(
-                f"🟢 **{skill}**"
-            )
-
-        with c2:
-
-            st.caption(
-                level
-            )
-
-        with c3:
-
-            if st.button(
-                "🗑️",
-                key=f"dt_{skill}"
-            ):
-
-                delete_skill(
-                    user_id,
-                    skill,
-                    "teach"
-                )
-
-                st.rerun()
-
-    st.divider()
-
-    # LEARNING
-    st.header(
-        "🔵 Skills I Want To Learn"
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        learn_name = st.text_input(
-            "Skill name",
-            key="learn_skill"
-        )
-
-    with c2:
-
-        learn_level = st.selectbox(
-            "Current level",
-            [
-                "Beginner",
-                "Intermediate",
-                "Advanced"
-            ],
-            key="learn_level"
-        )
-
-    if st.button(
-        "➕ Add Learning Goal"
-    ):
-
-        if add_skill(
-            user_id,
-            learn_name,
-            "learn",
-            learn_level
-        ):
-
-            st.success(
-                "Learning goal added!"
-            )
-
-            st.rerun()
-
-        else:
-
-            st.warning(
-                "Enter a new skill."
-            )
-
-    learning = get_skills(
-        user_id,
-        "learn"
-    )
-
-    for skill, level in learning:
-
-        c1, c2, c3 = st.columns(
-            [5, 2, 1]
-        )
-
-        with c1:
-
-            st.write(
-                f"🔵 **{skill}**"
-            )
-
-        with c2:
-
-            st.caption(
-                level
-            )
-
-        with c3:
-
-            if st.button(
-                "🗑️",
-                key=f"dl_{skill}"
-            ):
-
-                delete_skill(
-                    user_id,
-                    skill,
-                    "learn"
-                )
-
-                st.rerun()
-
-
-# ============================================================
-# FIND MATCHES
-# ============================================================
-
-elif page == "🔎 Find Matches":
-
-    user_id = st.session_state.user_id
-
-    st.title(
-        "🔎 Smart Skill Matching"
-    )
-
-    st.caption(
-        "Find people whose skills complement your own."
-    )
-
-    search = st.text_input(
-        "🔍 Search by name or skill"
-    )
-
-    min_score = st.slider(
-        "Minimum match score",
-        0,
-        100,
-        0,
-        5
-    )
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            id,
-            name,
-            bio,
-            availability,
-            mode
-        FROM users
-
-        WHERE id != ?
-    """, (user_id,))
-
-    users = cur.fetchall()
-
-    conn.close()
-
-    matches = []
-
-    for other in users:
-
-        result = calculate_match(
-            user_id,
-            other[0]
-        )
-
-        if result["score"] >= min_score:
-
-            matches.append(
-                (
-                    result,
-                    other
-                )
-            )
-
-    matches.sort(
-        key=lambda x: x[0]["score"],
-        reverse=True
-    )
-
-    if search:
-
-        query = search.lower()
-
-        filtered = []
-
-        for result, other in matches:
-
-            other_skills = (
-                get_skills(
-                    other[0],
-                    "teach"
-                )
-                +
-                get_skills(
-                    other[0],
-                    "learn"
-                )
-            )
-
-            skill_names = [
-                x[0].lower()
-                for x in other_skills
-            ]
-
-            if (
-                query in other[1].lower()
-                or any(
-                    query in skill
-                    for skill in skill_names
-                )
-            ):
-
-                filtered.append(
-                    (
-                        result,
-                        other
-                    )
-                )
-
-        matches = filtered
-
-    st.write(
-        f"**{len(matches)} compatible matches found**"
-    )
-
-    st.divider()
-
-    if not matches:
-
-        st.info(
-            "No compatible matches found. "
-            "Try adding more skills to your profile."
-        )
-
-    for result, other in matches:
-
-        score = result["score"]
-
-        st.markdown(
-            '<div class="match-card">',
-            unsafe_allow_html=True
-        )
-
-        c1, c2 = st.columns(
-            [5, 1]
-        )
-
-        with c1:
-
-            st.subheader(
-                f"👤 {other[1]}"
-            )
-
-            if other[2]:
-
-                st.caption(
-                    other[2]
-                )
-
-            if result["can_learn"]:
-
-                st.write(
-                    "🎓 **They can teach you:** "
-                    +
-                    ", ".join(
-                        sorted(
-                            result["can_learn"]
-                        )
-                    )
-                )
-
-            if result["can_teach"]:
-
-                st.write(
-                    "💡 **You can teach them:** "
-                    +
-                    ", ".join(
-                        sorted(
-                            result["can_teach"]
-                        )
-                    )
-                )
-
-            st.caption(
-                f"🕒 {other[3]}   •   💻 {other[4]}"
-            )
-
-        with c2:
-
-            st.metric(
-                "Match",
-                f"{score}%"
-            )
-            st.markdown(
-                f"""
-                <div class="progress-track">
-                    <div class="progress-fill" style="width:{max(0, min(100, score))}%"></div>
-                </div>
-                <div class="small-text">Compatibility score • rule-based engine</div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        if result["reciprocal"]:
-
-            st.markdown(
-                '<div class="reciprocal">'
-                '🔄 PERFECT RECIPROCAL MATCH'
-                '</div>',
-                unsafe_allow_html=True
-            )
-
-        with st.expander(
-            "🧠 Why this match?"
-        ):
-
-            for reason in result["reasons"]:
-
-                st.write(
-                    "✓ " + reason
-                )
-
-        if st.button(
-            "🤝 Send Exchange Request",
-            key=f"connect_{other[0]}"
-        ):
-
-            if send_request(
-                user_id,
-                other[0],
-                "Hi! I'd like to exchange skills with you."
-            ):
-
-                st.success(
-                    "Exchange request sent! 📩"
-                )
-
+        conn=db(); conn.execute('UPDATE users SET bio=?,availability=?,mode=? WHERE id=?',(bio,availability,mode,uid)); conn.commit(); conn.close(); st.success('Profile updated.')
+    st.subheader('Your skills')
+    for kind,label in [('teach','Can teach'),('learn','Want to learn')]:
+        st.write(f'**{label}**'); rows=skills(uid,kind)
+        if rows:
+            for name,level,status in rows: st.write(f'• {name} — {level} — {status}')
+        else: st.caption('No skills added yet.')
+    with st.expander('Add a skill'):
+        with st.form('addskill'):
+            name=st.text_input('Skill name'); kind=st.selectbox('Type',[('teach','Can teach'),('learn','Want to learn')],format_func=lambda x:x[1]); level=st.selectbox('Level',['Beginner','Intermediate','Advanced']); go=st.form_submit_button('Add skill')
+        if go:
+            if add_skill(uid,name,kind[0],level): st.success('Skill added.'); st.rerun()
+            else: st.warning('Skill already exists or is empty.')
+
+elif page=='🔎 Find Matches':
+    st.title('🔎 Find compatible partners')
+    minimum=st.slider('Minimum match score',0,100,30,5)
+    conn=db(); people=conn.execute('SELECT id,name,bio,verification_status,credits FROM users WHERE id!=?',(uid,)).fetchall(); conn.close()
+    found=[]
+    for person in people:
+        result=match(uid,person[0])
+        if result['score']>=minimum and (result['learn'] or result['teach']) and not is_blocked(uid,person[0]): found.append((person,result))
+    found.sort(key=lambda x:x[1]['score'],reverse=True)
+    if not found: st.info('No compatible matches yet. Try adding more skills or lowering the score filter.')
+    for person,result in found:
+        p, r=person,result
+        with st.container(border=True):
+            a,b=st.columns([3,1]);
+            with a:
+                st.subheader(f'{p[1]} • {r["score"]}% match')
+                st.caption(p[2] or 'No bio added.')
+                st.write('Learning from them:', ', '.join(sorted(r['learn'])) or '—')
+                st.write('Teaching to them:', ', '.join(sorted(r['teach'])) or '—')
+                st.write('Profile status:', p[3])
+                if r['reciprocal']: st.success('🔁 Reciprocal match detected')
+                for reason in r['reasons']: st.caption('✓ '+reason)
+            with b:
+                if st.button('Send request',key=f'req{p[0]}',use_container_width=True):
+                    if send_request(uid,p[0],'I would like to explore a skill exchange with you.'): st.success('Request sent.'); st.rerun()
+                if st.button('Report profile',key=f'rep{p[0]}',use_container_width=True):
+                    report_user(uid,p[0],'Profile concern submitted from prototype.'); st.warning('Report recorded for review.')
+                if st.button('Block profile',key=f'block{p[0]}',use_container_width=True):
+                    block_user(uid,p[0]); st.success('Profile blocked from your matching results.'); st.rerun()
+
+elif page.startswith('📩 Requests'):
+    st.title('📩 Exchange requests')
+    rows=incoming(uid)
+    if not rows: st.info('No incoming requests.')
+    for row in rows:
+        rid,sid,name,email,message,status,created=row
+        with st.container(border=True):
+            st.subheader(f'{name} • {status}'); st.caption(created); st.write(message or 'No message.')
+            if status=='Pending':
+                c1,c2=st.columns(2)
+                if c1.button('Accept',key=f'acc{rid}',use_container_width=True): accept_request(rid); st.success('Accepted.'); st.rerun()
+                if c2.button('Reject',key=f'rej{rid}',use_container_width=True): reject_request(rid); st.warning('Rejected.'); st.rerun()
+
+elif page=='🤝 My Exchanges':
+    st.title('🤝 My exchanges')
+    rows=exchanges(uid)
+    if not rows: st.info('No exchanges yet. Find a match and send a request.')
+    for row in rows:
+        eid,u1,u2,s1,s2,date,time,status,commitment,partner=row
+        with st.container(border=True):
+            st.subheader(f'Exchange #{eid} with {partner}')
+            st.write(f'Status: **{status}** | Commitment: **{commitment}**')
+            with st.form(f'ex{eid}'):
+                d=st.text_input('Date (YYYY-MM-DD)',value=date or '',key=f'd{eid}'); t=st.text_input('Time',value=time or '',key=f't{eid}'); c=st.selectbox('Commitment status',['Pending','Agreed','Reschedule requested','Cancelled'],index=['Pending','Agreed','Reschedule requested','Cancelled'].index(commitment) if commitment in ['Pending','Agreed','Reschedule requested','Cancelled'] else 0,key=f'c{eid}'); notes=st.text_area('Session notes',key=f'n{eid}'); save=st.form_submit_button('Save commitment')
+            if save: update_exchange(eid,d,t,c,notes); st.success('Exchange updated.'); st.rerun()
+            if status!='Completed' and st.button('Mark completed',key=f'complete{eid}'):
+                if complete_exchange(eid,uid): st.success('Completed and credits updated.'); st.rerun()
+
+elif page=='🛡️ Proof of Skill':
+    st.title('🛡️ Proof of Skill')
+    st.info('Automatic pre-screening checks evidence completeness, link format and recognized hosting domains. It does not claim that a person is skilled; final verification requires a reviewer or practical assessment.')
+    with st.form('evidence'):
+        skill=st.text_input('Skill being evidenced'); etype=st.selectbox('Evidence type',['GitHub project','Portfolio link','Certificate','Sample work','Practical assessment']); url=st.text_input('Evidence URL (optional)'); desc=st.text_area('Describe what the evidence demonstrates'); submit=st.form_submit_button('Submit evidence')
+    if submit:
+        if skill and desc: submit_evidence(uid,skill,etype,url,desc); st.success('Evidence submitted for review.'); st.rerun()
+        else: st.warning('Add a skill and a short description.')
+    st.subheader('Your evidence submissions')
+    rows=evidence_for(uid)
+    if not rows: st.caption('No evidence submitted yet.')
+    for row in rows:
+        eid,skill,etype,url,desc,status,auto_score,auto_notes,created=row
+        with st.container(border=True):
+            st.write(f'**{skill}** • {etype} • {status}'); st.caption(f'{created} • Automatic evidence score: {auto_score}/100'); st.write(desc); st.write(url or 'No URL provided'); st.caption(auto_notes)
+
+    st.caption('Next verification step: reviewer checks the submitted work or conducts a short practical task before awarding a skill-specific Verified badge.')
+
+elif page=='🎓 Skill Passport':
+    st.title('🎓 Skill Passport')
+    me=user(uid); c1,c2,c3=st.columns(3); c1.metric('Credits',me[10]); c2.metric('Completed exchanges',me[12]); c3.metric('Reputation',me[11])
+    st.subheader('Learning record')
+    for name,level,status in skills(uid): st.write(f'• **{name}** — {level} — {status}')
+    st.caption('Future scope: reviewer-approved badges, downloadable reports and institution-backed verification.')
+
+elif page=='💳 Credit Wallet':
+    st.title('💳 Credit Wallet')
+    me=user(uid)
+    c1,c2=st.columns(2); c1.metric('Available credits',me[10]); c2.metric('Completed exchanges',me[12])
+    st.info('Learning points are non-monetary: they cannot be withdrawn, sold, exchanged for cash, or used as payment. They only track participation and learning progress.')
+    rows=credit_history(uid)
+    if rows:
+        st.subheader('Credit history')
+        for amount,reason,eid,created in rows:
+            sign='+' if amount>=0 else ''
+            st.write(f'**{sign}{amount} credits** — {reason}'+(f' • Exchange #{eid}' if eid else '')+f' • {created}')
+    else: st.caption('Your credit history will appear after your first recorded transaction.')
+
+elif page=='🛡️ Safety Center':
+    st.title('🛡️ Safety Center')
+    st.info('Verification badges show the current review state of submitted evidence. They do not guarantee identity, expertise or personal safety.')
+    st.subheader('Safety checklist')
+    for item in ['Keep communication inside the platform where possible.', 'Do not share passwords, financial information or private documents.', 'Use public or institution-approved locations for offline meetings.', 'Report suspicious behaviour and cancel unsafe sessions.', 'Review a partner’s evidence, reputation and completed exchanges.']:
+        st.checkbox(item, value=False, key='safe_'+str(abs(hash(item))))
+    st.subheader('Report a user')
+    conn=db(); people=conn.execute('SELECT id,name,email FROM users WHERE id!=?',(uid,)).fetchall(); conn.close()
+    if people:
+        target=st.selectbox('User',people,format_func=lambda x:f'{x[1]} ({x[2]})')
+        reason=st.text_area('Reason for report')
+        if st.button('Submit safety report'):
+            if reason.strip(): report_user(uid,target[0],reason.strip()); st.success('Report submitted for review.')
+            else: st.warning('Please describe the concern.')
+    else: st.caption('No other users available.')
+
+elif page=='⭐ Ratings':
+    st.title('⭐ Ratings and reputation')
+    st.caption('Rate only exchanges you have completed. Ratings should be honest and respectful.')
+    rows=exchanges(uid)
+    if not rows: st.info('Complete an exchange before rating a partner.')
+    for row in rows:
+        eid,u1,u2,s1,s2,date,time,status,commitment,partner=row
+        partner_id=u2 if u1==uid else u1
+        if status=='Completed':
+            st.write(f'**Exchange #{eid} with {partner}**')
+            if has_rating(eid,uid): st.success('You have already rated this exchange.')
             else:
-
-                st.warning(
-                    "You already have a pending request with this user."
-                )
-
-        st.markdown(
-            "</div>",
-            unsafe_allow_html=True
-        )
-
-
-# ============================================================
-# REQUESTS
-# ============================================================
-
-elif page.startswith(
-    "📩 Requests"
-):
-
-    user_id = st.session_state.user_id
-
-    st.title(
-        "📩 Exchange Requests"
-    )
-
-    tab1, tab2 = st.tabs(
-        [
-            "📥 Incoming",
-            "📤 Sent"
-        ]
-    )
-
-    with tab1:
-
-        incoming = incoming_requests(
-            user_id
-        )
-
-        if not incoming:
-
-            st.info(
-                "No incoming requests yet."
-            )
-
-        for item in incoming:
-
-            (
-                request_id,
-                sender_id,
-                name,
-                email,
-                message,
-                status,
-                created
-            ) = item
-
-            with st.container(
-                border=True
-            ):
-
-                st.subheader(
-                    f"👤 {name}"
-                )
-
-                st.write(
-                    message
-                )
-
-                st.caption(
-                    created
-                )
-
-                if status == "Pending":
-
-                    c1, c2 = st.columns(2)
-
-                    with c1:
-
-                        if st.button(
-                            "✅ Accept",
-                            key=f"accept_{request_id}"
-                        ):
-
-                            accept_request(
-                                request_id
-                            )
-
-                            st.success(
-                                "Exchange accepted! 🤝"
-                            )
-
-                            st.rerun()
-
-                    with c2:
-
-                        if st.button(
-                            "❌ Decline",
-                            key=f"reject_{request_id}"
-                        ):
-
-                            reject_request(
-                                request_id
-                            )
-
-                            st.rerun()
-
-                else:
-
-                    st.info(
-                        f"Status: **{status}**"
-                    )
-
-    with tab2:
-
-        sent = sent_requests(
-            user_id
-        )
-
-        if not sent:
-
-            st.info(
-                "You haven't sent any requests."
-            )
-
-        for item in sent:
-
-            request_id, name, status, created = item
-
-            st.write(
-                f"👤 **{name}** — "
-                f"**{status}**"
-            )
-
-            st.caption(
-                created
-            )
-
-
-# ============================================================
-# MY EXCHANGES
-# ============================================================
-
-elif page == "🤝 My Exchanges":
-
-    user_id = st.session_state.user_id
-
-    st.title(
-        "🤝 My Skill Exchanges"
-    )
-
-    exchanges = get_exchanges(
-        user_id
-    )
-
-    if not exchanges:
-
-        st.info(
-            "You don't have any active exchanges yet."
-        )
-
-    for exchange in exchanges:
-
-        (
-            exchange_id,
-            user1,
-            user2,
-            skill1,
-            skill2,
-            date,
-            time,
-            status,
-            partner
-        ) = exchange
-
-        with st.container(
-            border=True
-        ):
-
-            st.subheader(
-                f"🤝 Exchange with {partner}"
-            )
-
-            st.write(
-                f"Status: **{status}**"
-            )
-
-            if date:
-
-                st.write(
-                    f"📅 {date}   🕒 {time}"
-                )
-
-            if status == "Active":
-
-                st.markdown(
-                    "### 📅 Schedule Exchange"
-                )
-
-                date_value = st.date_input(
-                    "Date",
-                    key=f"date_{exchange_id}"
-                )
-
-                time_value = st.time_input(
-                    "Time",
-                    key=f"time_{exchange_id}"
-                )
-
-                if st.button(
-                    "📅 Schedule",
-                    key=f"schedule_{exchange_id}"
-                ):
-
-                    schedule_exchange(
-                        exchange_id,
-                        str(date_value),
-                        str(time_value)
-                    )
-
-                    st.success(
-                        "Exchange scheduled! 📅"
-                    )
-
-                    st.rerun()
-
-                if st.button(
-                    "✅ Mark Exchange Completed",
-                    key=f"complete_{exchange_id}"
-                ):
-
-                    complete_exchange(
-                        exchange_id
-                    )
-
-                    st.success(
-                        "Exchange completed! 🎉"
-                    )
-
-                    st.rerun()
-
-            elif status == "Completed":
-
-                st.success(
-                    "🎉 Exchange completed."
-                )
-
-                partner_user = get_user(
-                    user2
-                    if user1 == user_id
-                    else user1
-                )
-
-                if not has_rated(
-                    exchange_id,
-                    user_id
-                ):
-
-                    st.subheader(
-                        "⭐ Rate your exchange partner"
-                    )
-
-                    rating = st.slider(
-                        "Rating",
-                        1,
-                        5,
-                        5,
-                        key=f"rating_{exchange_id}"
-                    )
-
-                    comment = st.text_area(
-                        "Comment",
-                        key=f"comment_{exchange_id}",
-                        placeholder="How was your experience?"
-                    )
-
-                    if st.button(
-                        "⭐ Submit Rating",
-                        key=f"rate_{exchange_id}"
-                    ):
-
-                        submit_rating(
-                            exchange_id,
-                            user_id,
-                            partner_user[0],
-                            rating,
-                            comment
-                        )
-
-                        st.success(
-                            "Thank you for your feedback! ⭐"
-                        )
-
-                        st.rerun()
-
-
-# ============================================================
-# SKILL PASSPORT
-# ============================================================
-
-elif page == "🎓 Skill Passport":
-
-    user_id = st.session_state.user_id
-
-    user = get_user(
-        user_id
-    )
-
-    total_skills, active, completed, rating = (
-        get_statistics(user_id)
-    )
-
-    st.title(
-        "🎓 Skill Passport"
-    )
-
-    st.markdown(
-        f"""
-        ### {user[1]}
-
-        **{user[4] if user[4] else "SkillSwap learner and contributor"}**
-        """
-    )
-
-    st.divider()
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    with c1:
-
-        st.metric(
-            "🎯 Skills",
-            total_skills
-        )
-
-    with c2:
-
-        st.metric(
-            "🤝 Exchanges",
-            active + completed
-        )
-
-    with c3:
-
-        st.metric(
-            "✅ Completed",
-            completed
-        )
-
-    with c4:
-
-        st.metric(
-            "⭐ Rating",
-            rating if rating else "New"
-        )
-
-    st.divider()
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        st.header(
-            "🟢 Teaching Skills"
-        )
-
-        teaching = get_skills(
-            user_id,
-            "teach"
-        )
-
-        if teaching:
-
-            for skill, level in teaching:
-
-                st.write(
-                    f"**{skill}**"
-                )
-
-                progress = {
-                    "Beginner": 0.33,
-                    "Intermediate": 0.66,
-                    "Advanced": 1.0
-                }[level]
-
-                st.progress(
-                    progress
-                )
-
-                st.caption(
-                    level
-                )
-
-        else:
-
-            st.info(
-                "No teaching skills yet."
-            )
-
-    with c2:
-
-        st.header(
-            "🔵 Learning Goals"
-        )
-
-        learning = get_skills(
-            user_id,
-            "learn"
-        )
-
-        if learning:
-
-            for skill, level in learning:
-
-                st.write(
-                    f"**{skill}**"
-                )
-
-                progress = {
-                    "Beginner": 0.33,
-                    "Intermediate": 0.66,
-                    "Advanced": 1.0
-                }[level]
-
-                st.progress(
-                    progress
-                )
-
-                st.caption(
-                    level
-                )
-
-        else:
-
-            st.info(
-                "No learning goals yet."
-            )
-
-    st.divider()
-
-    st.subheader(
-        "🏆 Achievements"
-    )
-
-    if total_skills >= 2:
-
-        st.success(
-            "🏆 Skill Builder — Added multiple skills"
-        )
-
-    if active + completed >= 1:
-
-        st.success(
-            "🤝 Connector — Started a skill exchange"
-        )
-
-    if completed >= 1:
-
-        st.success(
-            "🎓 Skill Sharer — Completed an exchange"
-        )
-
-    if rating >= 4:
-
-        st.success(
-            "⭐ Trusted Contributor — Strong community rating"
-        )
-
-    if (
-        total_skills < 2
-        and active + completed == 0
-    ):
-
-        st.info(
-            "Complete your first exchange to unlock achievements."
-        )
-
-
-# ============================================================
-# NOTIFICATIONS
-# ============================================================
-
-elif page == "🔔 Notifications":
-
-    user_id = st.session_state.user_id
-
-    st.title(
-        "🔔 Notifications"
-    )
-
-    notifications = get_notifications(
-        user_id
-    )
-
-    if not notifications:
-
-        st.info(
-            "You're all caught up! 🎉"
-        )
-
-    for notification in notifications:
-
-        (
-            notification_id,
-            title,
-            message,
-            is_read,
-            created
-        ) = notification
-
-        if is_read:
-
-            st.caption(
-                f"✓ {title} — {created}"
-            )
-
-        else:
-
-            with st.container(
-                border=True
-            ):
-
-                st.subheader(
-                    title
-                )
-
-                st.write(
-                    message
-                )
-
-                st.caption(
-                    created
-                )
-
-    if notifications:
-
-        if st.button(
-            "✓ Mark all as read"
-        ):
-
-            mark_notifications_read(
-                user_id
-            )
-
-            st.success(
-                "Notifications marked as read."
-            )
-
-            st.rerun()
-
-# ============================================================
-# APP FOOTER
-# ============================================================
-
-st.markdown("---")
-st.caption(
-    "🔄 SkillSync • Skill-for-skill learning • Built with Python, Streamlit and SQLite "
-    "• Prototype for MAITRON 2026"
-)
+                with st.form(f'rating_{eid}'):
+                    rating=st.slider('Rating',1,5,5,key=f'rate_{eid}')
+                    comment=st.text_area('Comment',key=f'comment_{eid}')
+                    submit=st.form_submit_button('Submit rating')
+                if submit:
+                    save_rating(eid,uid,partner_id,rating,comment); st.success('Rating saved.'); st.rerun()
+
+elif page=='🔔 Notifications':
+    st.title('🔔 Notifications')
+    conn=db(); rows=conn.execute('SELECT title,message,is_read,created_at FROM notifications WHERE user_id=? ORDER BY id DESC',(uid,)).fetchall(); conn.execute('UPDATE notifications SET is_read=1 WHERE user_id=?',(uid,)); conn.commit(); conn.close()
+    if not rows: st.info('No notifications yet.')
+    for title,message,read,created in rows:
+        with st.container(border=True): st.write(f'**{title}**'); st.write(message); st.caption(created)
+
+st.divider(); st.caption('SkillSwap 2.0 • Prototype for MAITRON 2026 • Skill-for-skill, with trust and accountability.')
