@@ -20,7 +20,11 @@ st.markdown("""
 .good {background:#064e3b; color:#6ee7b7;}
 .warn {background:#713f12; color:#fde68a;}
 .muted {color:#94a3b8; font-size:.9rem;}
-</style>
+.feature {padding:1.1rem; border:1px solid rgba(148,163,184,.22); border-radius:18px; background:linear-gradient(145deg,rgba(124,58,237,.14),rgba(52,211,153,.06)); min-height:145px; transition:transform .2s ease;}
+.feature:hover {transform:translateY(-3px); border-color:rgba(167,139,250,.65);}
+.section-title {font-size:1.25rem; font-weight:800; margin:1rem 0 .7rem;}
+div[data-testid=stMetric] {background:rgba(124,58,237,.08); padding:1rem; border-radius:16px; border:1px solid rgba(148,163,184,.18);}
+</style></style>
 """, unsafe_allow_html=True)
 
 
@@ -202,9 +206,32 @@ def reject_request(rid):
     if r: add_note(r[0],'Request declined','Your skill exchange request was declined.')
 
 
-def exchanges(uid):
-    conn=db(); rows=conn.execute("""SELECT e.id,e.user1,e.user2,e.skill_from_user1,e.skill_from_user2,e.scheduled_date,e.scheduled_time,e.status,e.commitment_status,u.name
-    FROM exchanges e JOIN users u ON u.id=CASE WHEN e.user1=? THEN e.user2 ELSE e.user1 END WHERE e.user1=? OR e.user2=? ORDER BY e.id DESC""",(uid,uid,uid)).fetchall(); conn.close(); return rows
+def exchanges(uid, include_completed=False):
+    conn=db(); q="""SELECT e.id,e.user1,e.user2,e.skill_from_user1,e.skill_from_user2,e.scheduled_date,e.scheduled_time,e.status,e.commitment_status,u.name
+    FROM exchanges e JOIN users u ON u.id=CASE WHEN e.user1=? THEN e.user2 ELSE e.user1 END WHERE (e.user1=? OR e.user2=?)"""
+    args=[uid,uid,uid]
+    if not include_completed: q += " AND e.status != 'Completed'"
+    q += " ORDER BY e.id DESC"
+    rows=conn.execute(q,args).fetchall(); conn.close(); return rows
+
+def completed_exchanges(uid):
+    return exchanges(uid, include_completed=True)
+
+def assistant_reply(question):
+    q=(question or '').lower().strip()
+    if not q: return 'Ask me about profiles, matching, evidence, exchanges, credits, or safety.'
+    rules=[
+        (['credit','point','money','cash'], 'Learning points are non-monetary. They cannot be withdrawn, sold, exchanged for cash, or used as payment.'),
+        (['evidence','verify','verification','skill proof'], 'Submit real evidence. Automatic screening checks completeness only; final verification needs review or a practical task.'),
+        (['match','find','partner'], 'Add at least one skill you can teach and one skill you want to learn, then open Find Matches.'),
+        (['request','accept','reject'], 'Send a request from Find Matches. The other person can accept or reject it from Requests.'),
+        (['complete','exchange','history'], 'My Exchanges shows active sessions. Completed exchanges are stored in Exchange History.'),
+        (['safe','safety','report','block'], 'Do not share passwords or financial information. Use approved/public places and report or block suspicious users.'),
+        (['skill','add','teach','learn'], 'Open My Profile, choose Add a skill, select teach or learn, and submit. The form resets after a successful addition.'),
+    ]
+    for words,answer in rules:
+        if any(word in q for word in words): return answer
+    return 'I can help with matching, evidence verification, exchanges, non-monetary credits, safety, and your Skill Passport.'
 
 
 def update_exchange(eid, date, time, commitment, notes, status=None):
@@ -270,7 +297,7 @@ if not st.session_state.logged_in:
     page=st.sidebar.radio('Navigation',['🏠 Home','🔐 Login','📝 Register'])
 else:
     uid=st.session_state.user_id; me=user(uid)
-    nav=["🏠 Dashboard","👤 My Profile","🔎 Find Matches",f"📩 Requests ({unread(uid)})","🤝 My Exchanges","🛡️ Proof of Skill","🎓 Skill Passport","💳 Credit Wallet","🛡️ Safety Center","⭐ Ratings","🔔 Notifications"]
+    nav=["🏠 Dashboard","👤 My Profile","🔎 Find Matches",f"📩 Requests ({unread(uid)})","🤝 My Exchanges","🗂️ Exchange History","🛡️ Proof of Skill","🎓 Skill Passport","💳 Credit Wallet","🛡️ Safety Center","⭐ Ratings","🤖 AI Assistant","🔔 Notifications"]
     page=st.sidebar.radio('Navigation',nav)
     st.sidebar.divider(); st.sidebar.write(f"👤 **{me[1]}**"); st.sidebar.metric('Skill Credits',me[10] if len(me)>10 else 20)
     if st.sidebar.button('🚪 Logout',use_container_width=True): st.session_state.logged_in=False; st.session_state.user_id=None; st.rerun()
@@ -278,11 +305,16 @@ else:
 if page=='🏠 Home':
     st.markdown('<div class="hero"><h1>🔄 SkillSwap 2.0</h1><p>Learn what you want by teaching what you know — with evidence screening, non-monetary learning points and accountability.</p></div>',unsafe_allow_html=True)
     c1,c2,c3,c4=st.columns(4); c1.metric('Core model','Skill-for-skill'); c2.metric('Trust','Evidence + reports'); c3.metric('Exchange','Credit-based'); c4.metric('Theme','SDG 8')
-    st.subheader('How it works')
+    st.markdown('<div class="section-title">How it works</div>',unsafe_allow_html=True)
     cols=st.columns(4)
     for col,head,desc in zip(cols,['1. Build profile','2. Verify evidence','3. Exchange credits','4. Track progress'],['Add skills you teach and want to learn.','Submit project links or other evidence.','Request, commit, schedule and complete sessions.','Earn credits, ratings and Skill Passport progress.']):
-        with col: st.markdown(f'<div class="card"><h4>{head}</h4><p>{desc}</p></div>',unsafe_allow_html=True)
+        with col: st.markdown(f'<div class="feature"><h4>{head}</h4><p>{desc}</p></div>',unsafe_allow_html=True)
     st.info('Example: You teach Python and want Canva. Another student teaches Canva and wants Python. SkillSwap identifies the reciprocal match.')
+    st.subheader('✨ Designed for meaningful exchanges')
+    a,b,c=st.columns(3)
+    with a: st.markdown('<div class="feature"><h4>🤝 Reciprocal matching</h4><p>Find people whose teaching and learning goals complement yours.</p></div>',unsafe_allow_html=True)
+    with b: st.markdown('<div class="feature"><h4>🛡️ Trust-first learning</h4><p>Use evidence screening, reporting and practical review instead of unsupported claims.</p></div>',unsafe_allow_html=True)
+    with c: st.markdown('<div class="feature"><h4>📚 Progress history</h4><p>Active exchanges stay in your workspace; completed exchanges move to history.</p></div>',unsafe_allow_html=True)
     st.subheader('Trust principles')
     st.write('Profiles distinguish self-declared skills from submitted evidence and verified skills. Users can report problems, track commitments and review completed exchanges.')
 
@@ -329,10 +361,14 @@ elif page=='👤 My Profile':
             for name,level,status in rows: st.write(f'• {name} — {level} — {status}')
         else: st.caption('No skills added yet.')
     with st.expander('Add a skill'):
-        with st.form('addskill'):
+        skill_form_key = st.session_state.get('skill_form_key', 0)
+        with st.form(f'addskill_{skill_form_key}'):
             name=st.text_input('Skill name'); kind=st.selectbox('Type',[('teach','Can teach'),('learn','Want to learn')],format_func=lambda x:x[1]); level=st.selectbox('Level',['Beginner','Intermediate','Advanced']); go=st.form_submit_button('Add skill')
         if go:
-            if add_skill(uid,name,kind[0],level): st.success('Skill added.'); st.rerun()
+            if add_skill(uid,name,kind[0],level):
+                st.session_state.skill_form_key = skill_form_key + 1
+                st.success('Skill added. The form is ready for your next skill.')
+                st.rerun()
             else: st.warning('Skill already exists or is empty.')
 
 elif page=='🔎 Find Matches':
@@ -392,6 +428,20 @@ elif page=='🤝 My Exchanges':
             if save: update_exchange(eid,d,t,c,notes); st.success('Exchange updated.'); st.rerun()
             if status!='Completed' and st.button('Mark completed',key=f'complete{eid}'):
                 if complete_exchange(eid,uid): st.success('Completed and credits updated.'); st.rerun()
+
+elif page=='🗂️ Exchange History':
+    st.title('🗂️ Exchange History')
+    st.caption('Completed exchanges are archived here. They no longer appear in My Exchanges.')
+    st.success('Your completed sessions are kept as a record for progress, ratings and Skill Passport updates.')
+    rows=[row for row in completed_exchanges(uid) if row[7]=='Completed']
+    if not rows: st.info('No completed exchanges yet.')
+    for row in rows:
+        eid,u1,u2,s1,s2,date,time,status,commitment,partner=row
+        with st.container(border=True):
+            st.subheader(f'✅ Exchange #{eid} with {partner}')
+            st.write(f'Status: **{status}**')
+            st.caption(f'Scheduled: {date or "Not set"} {time or ""}')
+            st.write('This exchange is saved in your history.')
 
 elif page=='🛡️ Proof of Skill':
     st.title('🛡️ Proof of Skill')
@@ -465,6 +515,17 @@ elif page=='⭐ Ratings':
                     submit=st.form_submit_button('Submit rating')
                 if submit:
                     save_rating(eid,uid,partner_id,rating,comment); st.success('Rating saved.'); st.rerun()
+
+elif page=='🤖 AI Assistant':
+    st.title('🤖 SkillSwap Assistant')
+    st.write('Ask for help with matching, evidence, exchanges, learning points, or safety.')
+    st.info('This prototype uses a guided help assistant. It gives safe, feature-specific guidance without pretending to verify skills or make decisions for users.')
+    question=st.text_input('What do you need help with?', placeholder='Example: How do I verify my Python skill?')
+    if st.button('Ask assistant',use_container_width=True):
+        st.success(assistant_reply(question))
+    st.subheader('Quick help')
+    for prompt in ['How do learning points work?','How does skill verification work?','How do I find a match?','How can I stay safe?']:
+        if st.button(prompt,key='help_'+prompt,use_container_width=True): st.info(assistant_reply(prompt))
 
 elif page=='🔔 Notifications':
     st.title('🔔 Notifications')
